@@ -101,10 +101,14 @@ agent_created: true
 | | 通道 A：agent-mail MCP | 通道 B：agently-cli |
 |---|---|---|
 | 形态 | WorkBuddy 连接器，工具形如 `mcp__agent-mail__*` | 命令行 `agently-cli`（npm 包） |
-| 取票用 | `ListMessages` / `ListAttachments` / `agent_mail_download_attachment` | `message +search` / `+read` / `attachment +download` |
+| 取票用 | `ListMessages` / `SearchMessages` / `GetMessage` / `ListAttachments` / `agent_mail_download_attachment` | `message +search` / `+read` / `attachment +download` |
+| 发信用 | `SendMessage` / `ReplyMessage` / `ForwardMessage`；带附件先 `agent_mail_upload_attachment` 拿到 `file_id`，再用 `file_refs` 引用 | `message +send` / `+reply` / `+forward`，附件用 `--attachment <相对路径>` 直传 |
+| 清理用 | `DeleteMessage` / `PermanentDeleteMessage` / `ClearTrash` | `message +trash` / `+delete` |
 | 优劣 | **首选**，无安装步骤、开箱即用 | 备用；OAuth 登录**经常超时失败**，失败就换通道 A |
 
-取发票**优先通道 A**；通道 A 不可用、或需要发送/回复/转发/监听等 MCP 未暴露的能力时才走通道 B。
+取发票**优先通道 A**。通道 A 已覆盖「列出 / 搜索 / 读取 / 列出附件 / 上传附件 / 下载附件 / 发送 / 回复 / 转发 / 删除」，
+只有这几种情况才走通道 B：通道 A 连不上、需要**持续监听新邮件**（`message +watch`，MCP 未提供）、
+或要用 CLI 独有的参数（`--body-file` 读正文文件、`--confirmed` 免两阶段确认）。
 
 ### 命令行通道（通道 B）
 
@@ -209,7 +213,11 @@ agently-cli +me
 ### 两阶段确认（写操作）
 
 发送 / 回复 / 转发 / 移到回收站 / 永久删除均需两阶段确认。
-其中发送 / 回复 / 转发在用户明确授权后，可传递 `--confirmed` 免除确认。
+两条通道机制相同，只是令牌叫法不同：CLI 是 `--confirmation-token ctk_xxx`，
+MCP 是把首次调用返回的 `confirmation_token` 原样回传（不带 token 的那一次会返回 summary + token）。
+
+用户明确授权时：CLI 可传 `--confirmed`、MCP 可传 `skip_confirmation: true` 免除确认
+（**只有用户本人明确说了"直接发""不用再问"才允许**）。
 
 ```
 第 N 轮 assistant：
