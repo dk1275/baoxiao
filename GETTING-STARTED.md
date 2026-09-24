@@ -4,8 +4,8 @@
 > 好消息是：**你不用记住任何流程**——说一句话，AI 会先检查你有没有准备好，
 > 没准备好就带你开通，开通完它自己接着往下干。
 
-> 📌 **前提**：技能已经装进 WorkBuddy 并重启过（还没装？看 [`README.md`](./README.md) 的「装到 WorkBuddy（三步）」，
-> 装技能 → 装依赖 → 连 Agent Mail 连接器，三步，大概 5 分钟）。
+> 📌 **前提**：技能已经装进 WorkBuddy 并重启过。还没装？看 [`README.md`](./README.md) 的「安装：一句话」——
+> 把 `拉取 https://gitee.com/dk1275/baoxiao，安装这个 skill` 发给 WorkBuddy 就行。
 
 ---
 

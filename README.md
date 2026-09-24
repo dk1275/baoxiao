@@ -2,122 +2,45 @@
 
 > 把邮箱里散落一整个出差周期的发票，自动收拢、去重、分类归档，并生成一张可以直接提交的报销明细表。
 
-这是 **WorkBuddy 的一个技能（Skill）**。装好之后，你只需要说一句「帮我整理报销」，
-从邮箱取票 → 解包 → 五类归档 → 出 Excel 明细表的全过程都由 AI 完成。
+## 安装：一句话
 
-- **只想快点用起来** → 直接看下面的 [装到 WorkBuddy](#装到-workbuddy三步)，装完说那句话就行
-- **完全不想看技术细节** → 装好后看 [`GETTING-STARTED.md`](./GETTING-STARTED.md)，那份是手把手带你用的
-- **想知道它怎么设计、踩过哪些坑** → 看 [`SKILL.md`](./SKILL.md)
+把下面这句**直接发给 WorkBuddy**：
 
----
+```
+拉取 https://gitee.com/dk1275/baoxiao，安装这个 skill
+```
 
-## 装到 WorkBuddy（三步）
+它会自己做完全部安装动作：把仓库拉到技能目录 `~/.workbuddy/skills/baoxiao`、装好 Python 依赖，
+然后提示你连接 Agent Mail 邮箱（连接器管理 → **Agent Mail / 智能体邮箱** → 连接 → 微信扫码，
+拿到一个 `你的名字@agent.qq.com` 的专属邮箱）。
 
-### 第 1 步 · 把技能放进 WorkBuddy 的技能目录
+**重启 WorkBuddy**，再说一句「帮我整理报销」，就能用了。
 
-WorkBuddy 的技能目录（用户级，装上后所有项目都能调用）：
+> 邮箱先不连也能装：第一次说「帮我整理报销」时，技能会自己检测邮箱状态并带你开通，
+> 开通完接着往下干，不用重新下指令。
 
-| 系统 | 技能目录 |
-| --- | --- |
-| Windows | `%USERPROFILE%\.workbuddy\skills\` |
-| macOS / Linux | `~/.workbuddy/skills/` |
-
-**本仓库的根目录就是技能目录本身**（`SKILL.md` 直接在最外层，中间没有多余的一层），
-所以「把仓库放进技能目录」就等于装好了：
+### 备选安装方式（不想用对话时）
 
 ```bash
-# macOS / Linux
+# 方式二 · 命令行（以后能 git pull 一键更新）
 git clone https://gitee.com/dk1275/baoxiao.git ~/.workbuddy/skills/baoxiao
 
-# Windows（Git Bash）
-git clone https://gitee.com/dk1275/baoxiao.git "$USERPROFILE/.workbuddy/skills/baoxiao"
-
-# Windows（PowerShell，路径写法不同）
-git clone https://gitee.com/dk1275/baoxiao.git "$env:USERPROFILE\.workbuddy\skills\baoxiao"
+# 方式三 · 手动：本页右上「克隆/下载」→ 下载 ZIP → 解压 → 文件夹改名 baoxiao，放进技能目录
+#   Windows 技能目录：%USERPROFILE%\.workbuddy\skills\
+#   macOS / Linux ：~/.workbuddy/skills/
 ```
 
-不想用命令行也行，三种方式任选其一：
+- 技能是个人自建，**没上架官方技能市场**，在「专家 → 技能」里搜不到，用上面任一方式安装即可。
+- 目录里 **`SKILL.md` 必须在第一层**（别套成 `baoxiao/baoxiao/`），否则加载不到。
+- 依赖 `pymupdf`（读票面）、`openpyxl`（出 Excel）若没装上，让 AI 顺手装一下即可：
+  `pip install pymupdf openpyxl`，用 WorkBuddy 隔离环境下的那个 pip。
 
-| 方式 | 怎么做 | 适合谁 |
-| --- | --- | --- |
-| **A · 命令行 clone** | 上面那几行命令 | 装了 git；以后 `git pull` 即可一键更新 |
-| **B · 让 AI 帮你装** | 把本页地址发给 WorkBuddy，说：「把这个仓库装成我的技能 https://gitee.com/dk1275/baoxiao」 | 不想碰命令行 |
-| **C · 下载 ZIP** | 本页右上「克隆/下载」→ 下载 ZIP → 解压 → 把文件夹改名为 `baoxiao`，整个放进技能目录 | 没装 git，也不打算更新 |
-
-> ⚠️ 本技能是个人自建技能，**没有上架 WorkBuddy 官方技能市场**，所以在「专家 → 技能」里搜不到，
-> 请用上面三种方式之一安装。
-
-装好之后目录必须长这样（**`SKILL.md` 要在第一层**，不要多套一层 `baoxiao/baoxiao/`）：
-
-```
-~/.workbuddy/skills/baoxiao/
-├── SKILL.md            技能入口，文件名固定，不能改名、不能缺
-├── README.md           本文件
-├── GETTING-STARTED.md  新手引导
-└── scripts/            可复用脚本
-```
-
-### 第 2 步 · 装两个 Python 依赖
-
-| 系统 | 命令 |
-| --- | --- |
-| Windows | `%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\pip install pymupdf openpyxl` |
-| macOS / Linux | `~/.workbuddy/binaries/python/envs/default/bin/pip install pymupdf openpyxl` |
-
-- `pymupdf` —— 读发票 PDF 上的票面文字（金额、发票号、日期）
-- `openpyxl` —— 生成 Excel 明细表
-
-上面用的是 WorkBuddy 自带的隔离 Python 环境。如果本机还没有这个环境，先建一个再装：
+### 更新 / 卸载
 
 ```bash
-# Windows
-python -m venv "%USERPROFILE%\.workbuddy\binaries\python\envs\default"
-# macOS / Linux
-python3 -m venv ~/.workbuddy/binaries/python/envs/default
+cd ~/.workbuddy/skills/baoxiao && git pull   # 方式二装的才有
+# 卸载：删掉这个目录，重启 WorkBuddy
 ```
-
-### 第 3 步 · 连上智能体邮箱（Agent Mail）
-
-技能靠这个邮箱取发票邮件。**没连也不要紧**——第一次说「帮我整理报销」时它会先检测，然后带你连：
-
-1. 打开 WorkBuddy 的「连接器管理」
-2. 找到 **Agent Mail / 智能体邮箱**，点「连接」
-3. 用微信扫码授权，拿到一个专供 AI 使用的邮箱：`你的名字@agent.qq.com`
-4. 回到对话说一声「好了」，它会接着往下干，**你不用重新下指令**
-
-> 之后每次开发票，把接收邮箱填成 `你的名字@agent.qq.com` 即可；已有的发票邮件也可以直接转发过去。
-> 这个邮箱和你私人邮箱完全隔离，AI 只能看到发到这里的邮件。
-
-### 验证装好了没
-
-**重启 WorkBuddy**，新开一个对话，发这一句：
-
-```
-帮我整理报销
-```
-
-它开始检查邮箱状态、翻附件，就说明技能已经加载成功。也可以在对话里 `@baoxiao` 显式点名这个技能。
-
-### 更新与卸载
-
-```bash
-# 更新（只有方式 A 装的行）
-cd ~/.workbuddy/skills/baoxiao && git pull
-
-# 卸载：删掉这个目录，然后重启 WorkBuddy 即可
-```
-
----
-
-## 环境要求
-
-| 项 | 说明 |
-| --- | --- |
-| WorkBuddy | 能装技能即可，无版本特殊要求 |
-| Agent Mail 连接器 | 必需；邮箱形如 `you@agent.qq.com`。未开通时技能会带你开通 |
-| Python | 3.13（用 WorkBuddy 自带的隔离环境就够了） |
-| 依赖 | `pymupdf`、`openpyxl` |
-| CLI（可选） | `agently-cli`，仅在备用通道 / 需要发信时用；只用连接器的话不需要 |
 
 ---
 
@@ -174,9 +97,6 @@ M.DD-M.DD出差报销/
 - 「去 xxx@agent.qq.com 整理下现在的报销附件，整理到桌面，建个 `M.DD-M.DD出差报销` 文件夹」
 - 「查下邮箱有没有新发票，整理进去」
 
-**没开通智能体邮箱也没关系**：技能会先检测邮箱状态，未开通时给出扫码开通信道，
-开通成功后会接着把整理流程走完，不需要你重新下指令。用户需要配合的只有「点连接 → 微信扫码授权」这两下。
-
 它会提醒你这些需要人工确认的点：
 - 同一笔消费的重复凭证（例如消费明细单 vs 正式发票）该交哪个
 - 多张住宿票日期重叠，是否重复报销同一晚
@@ -216,13 +136,9 @@ agently-cli +me            # 验证：回显邮箱地址即成功
 
 ## 换电脑 / 多台机器之间同步
 
-直接把技能目录当成这份仓库的 clone 用就行：
-
 ```bash
-# 新电脑第一次
+# 新电脑：先 clone（等于装好技能），再装依赖、连 Agent Mail，重启 WorkBuddy
 git clone https://gitee.com/dk1275/baoxiao.git ~/.workbuddy/skills/baoxiao
-# 然后重复「装到 WorkBuddy」里的第 2、3 步（装依赖 + 连 Agent Mail），重启 WorkBuddy
-
 # 之后更新
 cd ~/.workbuddy/skills/baoxiao && git pull
 ```
@@ -238,6 +154,11 @@ cd ~/.workbuddy/skills/baoxiao && git pull
 4. **同名文件互相覆盖**：同一家酒店的多封邮件解到同一目录会覆盖结账单，必须逐封单独提取。
 5. **归档可能丢文件**：批量移动后要**前后各打印一次文件清单对比**，缺的从原始附件重新提取。这条是踩过坑加上的。
 6. **票面发票号乱码**：部分票根 PDF 的发票号文本是乱码，以二维码或平台记录为准。
+
+## 更多
+
+- 一步步的新手引导：[`GETTING-STARTED.md`](./GETTING-STARTED.md)
+- 完整技能说明与操作细节：[`SKILL.md`](./SKILL.md)
 
 ## 许可
 
