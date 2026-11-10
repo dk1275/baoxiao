@@ -2,16 +2,16 @@
 """行程预估 + 凭证缺失体检（只读）。
 
 用法：
-    python estimate_trip.py <报销根目录> [--from 10.1] [--to 11.05] [--out 行程预估.md]
+    python estimate_trip.py <报销根目录> [--from 10.1] [--to 10.15] [--out 行程预估.md]
 
-只读脚本：不移动、不删除任何票据，只产出一份 Markdown 报告（默认写到报销根目录）。
-数据来源优先级：文件名里的日期/城市/金额 → 票面文本（pymupdf，可选）。
-票面读不到就标「未标注」，**不猜、不补**。
+两种模式，自动选：
 
-分级：
-    必须补   —— 单晚住宿断档、城际移动缺票、打车缺行程单
-    建议确认 —— 首日无到达票、末日无返程票、连续多晚无住宿（疑似常驻地）、
-                连续空档日、住宿票无入离日期、区间外票据
+1. **有「行程推断」工作表**（`*报销明细*.xlsx` 里人工核对过的行程表）→ 以它为权威口径：
+   逐日行程、缺票清单直接取自该表，脚本只补做票层面的复核（住宿断档 / 打车缺行程单 / 区间外）。
+   这样不会推翻人工结论，也不会把「12306 自动推单（未取票）」误报成缺票。
+2. **没有该表** → 退回文件名推断：按五类目录的文件名/票面取日期·城市·金额，自己拼行程、判缺失。
+
+只读：不移动、不删除、不改名任何票据。
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ from pathlib import Path
 CATS = ["酒店", "请客户", "打车", "高铁", "机票"]
 SKIP_DIRS = {"_原始邮件附件", "_work", "_staging", "_tmp_extract", "__pycache__"}
 
-# 常见出差城市（够用即可；未命中不报错，只是判不出城市）
 CITIES = [
     "北京", "上海", "广州", "深圳", "天津", "重庆", "成都", "杭州", "南京", "武汉",
     "西安", "苏州", "无锡", "宁波", "温州", "合肥", "长沙", "郑州", "济南", "青岛",
@@ -45,6 +44,7 @@ MONEY_RE = re.compile(r"(\d+(?:\.\d+)?)\s*元")
 ROUTE_RE = re.compile(r"([\u4e00-\u9fa5]{2,4})\s*[-—–→]\s*([\u4e00-\u9fa5]{2,4})")
 FLIGHT_RE = re.compile(r"\b([A-Z]{2}\d{3,4})\b")
 TRAIN_RE = re.compile(r"\b([GDCZTK]\d{1,4})\b")
+LEG_DATE_RE = re.compile(r"^\s*(\d{1,2})-(\d{1,2})")
 
 
 @dataclass
@@ -64,6 +64,16 @@ class Item:
     @property
     def cross_day(self) -> bool:
         return bool(self.end_date and self.date and self.end_date > self.date)
+
+
+@dataclass
+class Leg:
+    date: dt.date | None
+    city: str
+    step: str
+    proof: str
+    amount: str
+    status: str
 
 
 def text_of(pdf: Path) -> str:
@@ -86,7 +96,6 @@ def cities_in(s: str) -> list[str]:
 def parse_item(cat: str, p: Path, base_year: int) -> Item:
     it = Item(cat=cat, path=p)
     stem = p.stem
-
     m = DATE_RE.match(stem)
     if m:
         mm, dd, mm2, dd2 = m.groups()
@@ -147,6 +156,48 @@ def collect(root: Path, base_year: int) -> list[Item]:
     return items
 
 
+def read_trip_sheet(root: Path, base_year: int) -> tuple[str, str, list[Leg]] | None:
+    """找 `*报销明细*.xlsx` 里名字含「行程」的工作表，解析成 leg 列表。"""
+    try:
+        import openpyxl  # noqa: WPS433
+    except Exception:
+        return None
+    for f in sorted(root.glob("*.xlsx")):
+        if f.name.startswith("~$") or f.name.startswith("_tmp"):
+            continue
+        try:
+            wb = openpyxl.load_workbook(f, data_only=True)
+        except Exception:
+            continue
+        for name in wb.sheetnames:
+            if "行程" not in name:
+                continue
+            ws = wb[name]
+            rows = [list(r) for r in ws.iter_rows(values_only=True)]
+            hi = next((i for i, r in enumerate(rows)
+                       if any(isinstance(c, str) and "日期" in c for c in r)
+                       and any(isinstance(c, str) and "状态" in c for c in r)), None)
+            if hi is None:
+                continue
+            legs: list[Leg] = []
+            for r in rows[hi + 1:]:
+                cells = [("" if c is None else str(c).strip()) for c in r]
+                if len(cells) < 7 or not any(cells):
+                    continue
+                m = LEG_DATE_RE.match(cells[1])
+                d = None
+                if m:
+                    try:
+                        d = dt.date(base_year, int(m.group(1)), int(m.group(2)))
+                    except ValueError:
+                        d = None
+                legs.append(Leg(date=d, city=cells[2], step=cells[3], proof=cells[4],
+                                amount=cells[5], status=cells[6]))
+            if legs:
+                return f.name, name, legs
+    return None
+
+
 def parse_md(s: str) -> dt.date | None:
     s = s.strip()
     m = re.fullmatch(r"(\d{1,2})[.\-/](\d{1,2})", s) or re.fullmatch(r"(\d{1,2})月(\d{1,2})[日号]?", s)
@@ -168,7 +219,6 @@ def dstr(d: dt.date) -> str:
 
 
 def runs(days: list[dt.date]) -> list[list[dt.date]]:
-    """把连续日期分组。"""
     out: list[list[dt.date]] = []
     for d in days:
         if out and d == out[-1][-1] + dt.timedelta(days=1):
@@ -178,10 +228,182 @@ def runs(days: list[dt.date]) -> list[list[dt.date]]:
     return out
 
 
-def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
-    items = [i for i in collect(root, (start or dt.date.today()).year) if i.date]
-    items.sort(key=lambda x: (x.date, x.cat))
+def auto_checks(root: Path, items: list[Item], days: list[dt.date],
+                home: str = "", day_city: dict[dt.date, str] | None = None) -> tuple[list[str], list[str]]:
+    """票层面复核：住宿断档 + 打车缺行程单。
 
+    home + day_city 只在「有行程推断表」模式传入：落在常驻地的夜晚不判住宿断档。
+    """
+    must: list[str] = []
+    hint: list[str] = []
+    stay = [i for i in items if i.cat == "酒店"]
+    taxi = [i for i in items if i.cat == "打车"]
+    day_city = day_city or {}
+
+    covered: set[dt.date] = set()
+    city_night: dict[dt.date, str] = {}
+    for h in stay:
+        n, last = h.date, (h.end_date or h.date)
+        while n < last:
+            covered.add(n)
+            if h.city:
+                city_night[n] = h.city
+            n += dt.timedelta(days=1)
+
+    check_nights = days[:-1] if len(days) > 1 else days
+    home_nights: list[dt.date] = []
+    for run in runs([d for d in check_nights if d not in covered]):
+        if home and day_city:
+            kept = []
+            for d in run:
+                (home_nights if day_city.get(d) == home else kept).append(d)
+            run = kept
+            if not run:
+                continue
+        cities = {city_night.get(d, "") for d in run} - {""}
+        if len(run) >= 2 and len(cities) == 1:
+            hint.append(f"**{run[0]:%m.%d}-{run[-1]:%m.%d} 连续 {len(run)} 晚无住宿凭证**："
+                        f"若当地有常驻住处 / 客户统一安排，属正常；若确实住酒店则是整段漏票")
+        else:
+            for d in run:
+                must.append(f"**{dstr(d)}住宿断档**：当晚无住宿发票 —— 当晚返程 / 住亲友 / 客户安排请说明后忽略")
+
+    if home_nights:
+        hint.append(f"**{home_nights[0]:%m.%d}-{home_nights[-1]:%m.%d} 共 {len(home_nights)} 晚在 {home}（常驻地）**："
+                    f"按常驻处理，不要求住宿票")
+
+    itin_dir = root / "打车" / "行程单"
+    itin = {p.stem.replace("_行程单", "") for p in itin_dir.glob("*.pdf")} if itin_dir.is_dir() else set()
+    for t in taxi:
+        if t.path.stem.replace("_发票", "") not in itin:
+            must.append(f"**打车缺行程单**：`{t.path.name}` 在 `打车/行程单/` 里没有同名行程单")
+    return must, hint
+
+
+def render_header(start: dt.date, end: dt.date, days: list[dt.date], items: list[Item],
+                  chain: str, source: str) -> list[str]:
+    total = sum(i.amount or 0 for i in items)
+    inside = [i for i in items if i.date and start <= i.date <= end]
+    outside = [i for i in items if i.date and not (start <= i.date <= end)]
+    L = [f"# 行程预估与凭证体检 · {start:%m.%d}-{end:%m.%d}", ""]
+    if outside:
+        L.append(f"- 区间：{start:%Y-%m-%d} ~ {end:%Y-%m-%d}（{len(days)} 天）"
+                 f"｜区间内 {len(inside)} 张 ¥{sum(i.amount or 0 for i in inside):,.2f}"
+                 f"｜区间外 {len(outside)} 张 ¥{sum(i.amount or 0 for i in outside):,.2f}"
+                 f"｜合计 {len(items)} 张 ¥{total:,.2f}")
+    else:
+        L.append(f"- 区间：{start:%Y-%m-%d} ~ {end:%Y-%m-%d}（{len(days)} 天）"
+                 f"｜票据 {len(items)} 张｜合计 ¥{total:,.2f}")
+    L.append(f"- 预估行程：**{chain or '（城市无法判定）'}**")
+    L.append(f"- 口径：{source}")
+    L.append("")
+    return L
+
+
+def build_from_sheet(root: Path, start: dt.date | None, end: dt.date | None,
+                     items: list[Item], sheet_name: str, ws_name: str, legs: list[Leg]) -> str:
+    dated = [l for l in legs if l.date]
+    if not start:
+        start = min((l.date for l in dated), default=dt.date.today())
+    if not end:
+        end = max((l.date for l in dated), default=start)
+    if end < start:
+        end = end.replace(year=end.year + 1)
+    days = [start + dt.timedelta(days=n) for n in range((end - start).days + 1)]
+
+    chain: list[str] = []
+    movements = [l for l in legs if re.search(r"城际|航班|飞行", l.step or "")]
+    if legs:
+        chain = cities_in(legs[0].city or "")[:1]
+    for l in movements:
+        for c in cities_in(l.city or ""):
+            if c and (not chain or chain[-1] != c):
+                chain.append(c)
+    home = ""
+    if movements:
+        dests = cities_in(movements[-1].city or "")
+        home = dests[-1] if dests else ""
+    if not chain:
+        chain = ["（未标注）"]
+
+    # 逐日所在城市（供住宿断档判定用）：取当天最后一条 leg 的末位城市，空档日沿用前一天
+    day_city: dict[dt.date, str] = {}
+    carry = chain[0] if chain and chain[0] != "（未标注）" else ""
+    for d in days:
+        ls = [l for l in legs if l.date == d and (l.city or "").strip()]
+        if ls:
+            cs = cities_in(ls[-1].city or "")
+            if cs:
+                carry = cs[-1]
+        if carry:
+            day_city[d] = carry
+
+    L = render_header(start, end, days, items, " → ".join(chain),
+                      f"行程取自 `{sheet_name}` 的「{ws_name}」表（人工核对 {len(legs)} 段）＋ 票面自动复核")
+
+    L.append("## 一、逐日行程")
+    L.append("")
+    L.append("| 日期 | 城市 | 行程环节 | 凭证 / 关联票 | 状态 |")
+    L.append("| --- | --- | --- | --- | --- |")
+    for d in days:
+        ls = [l for l in legs if l.date == d]
+        city = " → ".join(dict.fromkeys(x.strip() for l in ls for x in re.split(r"\s*→\s*", l.city) if x.strip()))
+        step = "；".join(l.step for l in ls if l.step) or "—"
+        proof = "；".join(l.proof for l in ls if l.proof) or "—"
+        st = "；".join(dict.fromkeys(l.status for l in ls if l.status)) or "—"
+        L.append(f"| {d:%m.%d} 周{weekday(d)} | {city or '—'} | {step} | {proof} | {st} |")
+    L.append("")
+
+    missing = [l for l in legs if re.search(r"缺票|未收到|缺失", l.status or "")]
+    pending = [l for l in legs if re.search(r"自动推单|待取票|未取票", l.status or "")]
+
+    must, hint = auto_checks(root, items, days, home=home, day_city=day_city)
+
+    L.append(f"## 二、缺票（行程推断表判定，{len(missing)} 段）")
+    L.append("")
+    if missing:
+        for l in missing:
+            day = f"{l.date:%m.%d} " if l.date else ""
+            amt = f" ¥{l.amount}" if l.amount else ""
+            L.append(f"- [ ] **{day}{l.city}**：{l.step}{amt} —— {l.proof or '无凭证'}")
+    else:
+        L.append("- 无")
+    L.append("")
+
+    L.append(f"## 三、票面自动复核（{len(must)} 项必须补 / {len(hint)} 项建议确认）")
+    L.append("")
+    L.extend([f"- [ ] {x}" for x in must] or ["- 无必须补项"])
+    L.extend([f"- {x}" for x in hint])
+    L.append("")
+
+    if pending:
+        L.append(f"## 四、自动推单 / 待取票（{len(pending)} 段，不算缺票）")
+        L.append("")
+        for l in pending:
+            day = f"{l.date:%m.%d} " if l.date else ""
+            L.append(f"- {day}{l.city}：{l.step} —— {l.proof or '12306 自动推单，未取票'}；需要入账时去 12306 取票即可")
+        L.append("")
+
+    outside = [i for i in items if i.date and not (start <= i.date <= end)]
+    if outside:
+        L.append("## 五、区间外票据（仍纳入合计，不剔除）")
+        L.append("")
+        for i in outside:
+            L.append(f"- {i.date:%Y-%m-%d} {i.cat} {i.path.name} ¥{money(i.amount)}")
+        L.append("")
+
+    L.append("## 判定说明")
+    L.append("")
+    L.append("- 行程与缺票以「行程推断」表为准（人工核对过），脚本**不覆盖**其中的人工结论。")
+    L.append("- 「自动推单 / 未取票」是 12306 已出行但未取票，不算缺票；需要入账时再取票。")
+    L.append("- 票面自动复核只做三件事：住宿断档、打车缺同名行程单、区间外票据单列。")
+    L.append("- 本报告只读，未移动或删除任何文件。")
+    return "\n".join(L) + "\n"
+
+
+def build_heuristic(root: Path, start: dt.date | None, end: dt.date | None, items: list[Item]) -> str:
+    items = [i for i in items if i.date]
+    items.sort(key=lambda x: (x.date, x.cat))
     stay = [i for i in items if i.cat == "酒店"]
     move = [i for i in items if i.cat in ("机票", "高铁")]
     taxi = [i for i in items if i.cat == "打车"]
@@ -195,7 +417,6 @@ def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
         end = end.replace(year=end.year + 1)
     days = [start + dt.timedelta(days=n) for n in range((end - start).days + 1)]
 
-    # 逐日城市：住宿覆盖的夜晚 → 当日到达的交通 → 当日打车（跨日打车不参与，避免把首日钉错城市）
     city_of: dict[dt.date, str] = {}
     for h in stay:
         if not h.city:
@@ -210,7 +431,6 @@ def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
     for t in taxi:
         if t.city and not t.cross_day:
             city_of.setdefault(t.date, t.city)
-
     last_known = ""
     for d in days:
         if d in city_of:
@@ -218,29 +438,8 @@ def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
         elif last_known:
             city_of[d] = last_known
 
-    must: list[str] = []
-    hint: list[str] = []
+    must, hint = auto_checks(root, items, days)
 
-    # 1) 住宿断档
-    covered: set[dt.date] = set()
-    for h in stay:
-        n, last = h.date, (h.end_date or h.date)
-        while n < last:
-            covered.add(n)
-            n += dt.timedelta(days=1)
-    check_nights = days[:-1] if len(days) > 1 else days
-    uncovered = [d for d in check_nights if d not in covered]
-    for run in runs(uncovered):
-        cities = {city_of.get(d, "") for d in run}
-        if len(run) >= 2 and len(cities) == 1 and "" not in cities:
-            hint.append(f"**{run[0]:%m.%d}-{run[-1]:%m.%d} 连续 {len(run)} 晚在 {cities.pop()} 无住宿凭证**："
-                        f"疑似常驻地 / 客户统一安排住宿 —— 若确实住酒店则是整段漏票")
-        else:
-            for d in run:
-                must.append(f"**{dstr(d)}住宿断档**：当晚无住宿发票（城市 {city_of.get(d, '未标注')}）"
-                            f" —— 当晚返程 / 住亲友 / 客户安排请说明后忽略")
-
-    # 2) 城际移动缺票
     for prev, cur in zip(days, days[1:]):
         a, b = city_of.get(prev, ""), city_of.get(cur, "")
         if a and b and a != b and not any(t.date == cur and t.city_to for t in move):
@@ -248,76 +447,41 @@ def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
             extra = "；当天在到达城市已有打车记录，说明位移确实发生，缺的是位移票据本身" if taxi_there else ""
             must.append(f"**{dstr(cur)}{a} → {b} 城际交通缺票**：当天无机票 / 高铁发票{extra}")
 
-    # 3) 末日无返程
     if len(days) > 1 and not any(t.date == end for t in move):
-        hint.append(f"**{dstr(end)}无返程交通票**：当天没有离开 {city_of.get(end, '当地') or '当地'} 的机票 / 高铁"
-                    f" —— 当地即常驻地或另有安排可忽略")
-
-    # 4) 首日无到达交通
+        hint.append(f"**{dstr(end)}无返程交通票**：当天没有离开 {city_of.get(end, '当地')} 的机票 / 高铁 —— 当地即常驻地或另有安排可忽略")
     if not any(t.date == start for t in move) and stay:
         hint.append(f"**{dstr(start)}无到达交通票**：当天只有住宿凭证 —— 本地出发 / 自驾 / 客户接送可忽略")
 
-    # 5) 空档日（连续合并）
     busy = {i.date for i in items}
-    empties = [d for d in days if d not in busy]
-    for run in runs(empties):
+    for run in runs([d for d in days if d not in busy]):
         if len(run) == 1:
             hint.append(f"**{dstr(run[0])}整天无任何凭证**：确认当天是否无需发生费用")
         else:
-            hint.append(f"**{run[0]:%m.%d}-{run[-1]:%m.%d} 连续 {len(run)} 天无任何凭证**："
-                        f"确认这段时间是否在当地办公 / 无费用发生")
+            hint.append(f"**{run[0]:%m.%d}-{run[-1]:%m.%d} 连续 {len(run)} 天无任何凭证**：确认这段时间是否在当地办公 / 无费用发生")
 
-    # 6) 打车缺行程单
-    taxi_dir, itin_dir = root / "打车", root / "打车" / "行程单"
-    itin = {p.stem.replace("_行程单", "") for p in itin_dir.glob("*.pdf")} if itin_dir.is_dir() else set()
-    for t in taxi:
-        if t.path.stem.replace("_发票", "") not in itin:
-            must.append(f"**打车缺行程单**：`{t.path.name}` 在 `打车/行程单/` 里没有同名行程单")
-
-    # 7) 住宿票无入离日期
     for h in stay:
         if not h.end_date:
             hint.append(f"**住宿票未标注入离日期**：`{h.path.name}` —— 间夜数无法确认，按结账单或系统记录补")
 
-    # 8) 同日多城打车（同一张票里的多城已按跨日处理，这里只抓"同一天两张票、两个城市"）
     day_taxi_cities: dict[dt.date, set[str]] = {}
     for t in taxi:
         if t.city and not t.cross_day:
             day_taxi_cities.setdefault(t.date, set()).add(t.city)
     for d, cs in sorted(day_taxi_cities.items()):
         if len(cs) > 1:
-            detail = "；".join(f"{t.city} ¥{money(t.amount)}" for t in taxi
-                              if t.date == d and t.city and not t.cross_day)
-            hint.append(f"**{dstr(d)}同日出现 {len(cs)} 个城市的打车记录（{' / '.join(sorted(cs))}）**："
-                        f"{detail} —— 当天可能有多段城际移动，行程归属与位移票据都要确认")
+            detail = "；".join(f"{t.city} ¥{money(t.amount)}" for t in taxi if t.date == d and t.city and not t.cross_day)
+            hint.append(f"**{dstr(d)}同日出现 {len(cs)} 个城市的打车记录（{' / '.join(sorted(cs))}）**：{detail} —— 行程归属与位移票据都要确认")
 
-    # 9) 区间外
     outside = [i for i in items if not (start <= i.date <= end)]
-
-    # ---- 报告 ----
-    total = sum(i.amount or 0 for i in items)
     chain: list[str] = []
     for d in days:
         c = city_of.get(d, "")
         if c and (not chain or chain[-1] != c):
             chain.append(c)
-    headline = " → ".join(chain) or "（城市无法判定）"
 
-    L: list[str] = []
-    L.append(f"# 行程预估与凭证体检 · {start:%m.%d}-{end:%m.%d}")
-    L.append("")
-    inside = [i for i in items if start <= i.date <= end]
-    if outside:
-        L.append(f"- 区间：{start:%Y-%m-%d} ~ {end:%Y-%m-%d}（{len(days)} 天）"
-                 f"｜区间内 {len(inside)} 张 ¥{sum(i.amount or 0 for i in inside):,.2f}"
-                 f"｜区间外 {len(outside)} 张 ¥{sum(i.amount or 0 for i in outside):,.2f}"
-                 f"｜合计 {len(items)} 张 ¥{total:,.2f}")
-    else:
-        L.append(f"- 区间：{start:%Y-%m-%d} ~ {end:%Y-%m-%d}（{len(days)} 天）"
-                 f"｜票据 {len(items)} 张｜合计 ¥{total:,.2f}")
-    L.append(f"- 预估行程：**{headline}**")
-    L.append("- 口径：只统计五类发票；城市取自文件名或票面，读不到标「未标注」，全程不推测。")
-    L.append("")
+    L = render_header(start, end, days, items, " → ".join(chain),
+                      "未找到「行程推断」工作表，按文件名/票面自行推断；城市读不到标「未标注」，不推测")
+
     L.append("## 一、逐日行程")
     L.append("")
     L.append("| 日期 | 城市 | 住宿 | 交通 | 其他 | 凭证数 |")
@@ -328,8 +492,7 @@ def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
         tx = [x for x in taxi if x.date == d]
         me = [x for x in meal if x.date == d]
         h_txt = f"{h[0].city or '未标注'} ¥{money(h[0].amount)}" if h else ""
-        mv_txt = "；".join(f"{'✈' if x.cat == '机票' else '🚄'} {x.city}→{x.city_to or '未标注'} ¥{money(x.amount)}"
-                          for x in mv)
+        mv_txt = "；".join(f"{'✈' if x.cat == '机票' else '🚄'} {x.city}→{x.city_to or '未标注'} ¥{money(x.amount)}" for x in mv)
         tx_txt = "；".join(
             (f"{x.city or '未标注'}打车 ¥{money(x.amount)}" if not x.cross_day
              else f"跨日打车 {'/'.join(x.cities) or '未标注'} ¥{money(x.amount)}（{x.date:%m.%d}-{x.end_date:%m.%d}）")
@@ -339,35 +502,28 @@ def build(root: Path, start: dt.date | None, end: dt.date | None) -> str:
         n = len(h) + len(mv) + len(tx) + len(me)
         cs = day_taxi_cities.get(d) or set()
         shown = " / ".join(sorted(cs)) + "（待确认）" if len(cs) > 1 else city_of.get(d, "未标注")
-        L.append(f"| {d:%m.%d} 周{weekday(d)} | {shown} | {h_txt} | {mv_txt} | "
-                 f"{other} | {n or '**0**'} |")
+        L.append(f"| {d:%m.%d} 周{weekday(d)} | {shown} | {h_txt} | {mv_txt} | {other} | {n or '**0**'} |")
     L.append("")
-
-    sec = 2
     L.append(f"## 二、必须补（{len(must)} 项）")
     L.append("")
     L.extend([f"- [ ] {x}" for x in must] or ["- 无"])
     L.append("")
-    sec += 1
     L.append(f"## 三、建议确认（{len(hint)} 项）")
     L.append("")
     L.extend([f"- {x}" for x in hint] or ["- 无"])
     L.append("")
     if outside:
-        L.append("## 四、区间外票据（按规则仍纳入合计，不剔除）")
+        L.append("## 四、区间外票据（仍纳入合计，不剔除）")
         L.append("")
         for i in outside:
             L.append(f"- {i.date:%Y-%m-%d} {i.cat} {i.path.name} ¥{money(i.amount)}")
         L.append("")
-        nxt = "五"
-    else:
-        nxt = "四"
-    L.append(f"## {nxt}、判定依据")
+    L.append("## 判定依据")
     L.append("")
-    L.append("- 住宿断档：按区间逐晚比对住宿票覆盖的夜晚；末日视为返程日，不要求住宿。")
-    L.append("- 常驻地判定：连续 2 晚以上同一城市无住宿 → 归入「建议确认」，不当作缺票逐条报。")
+    L.append("- 住宿断档：逐晚比对住宿票覆盖的夜晚；末日视为返程日，不要求住宿。")
+    L.append("- 连续 ≥2 晚同城无住宿 → 归入「建议确认」，不逐条报缺票。")
     L.append("- 城际缺票：相邻两日城市不同，且当日无机票 / 高铁凭证。")
-    L.append("- 跨日打车（如 10.1-10.5 一张票含多城多笔）不参与逐日城市判定，避免把首日钉错城市。")
+    L.append("- 跨日打车票不参与逐日城市判定，避免把首日钉错城市。")
     L.append("- 打车行程单：`打车/` 与 `打车/行程单/` 文件名需同名成对。")
     L.append("- 本报告只读，未移动或删除任何文件。")
     return "\n".join(L) + "\n"
@@ -377,7 +533,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("root", help="报销根目录（含 酒店/打车/高铁/机票/请客户）")
     ap.add_argument("--from", dest="frm", help="起始日期，如 10.1")
-    ap.add_argument("--to", dest="to", help="结束日期，如 11.05")
+    ap.add_argument("--to", dest="to", help="结束日期，如 10.15")
     ap.add_argument("--out", help="报告输出路径，默认 <root>/行程预估.md")
     ap.add_argument("--json", dest="json_out", help="同时输出结构化 JSON")
     a = ap.parse_args()
@@ -389,16 +545,23 @@ def main() -> int:
 
     start = parse_md(a.frm) if a.frm else None
     end = parse_md(a.to) if a.to else None
-    report = build(root, start, end)
+    base_year = (start or dt.date.today()).year
+    items = collect(root, base_year)
+
+    sheet = read_trip_sheet(root, base_year)
+    if sheet:
+        fname, wsname, legs = sheet
+        report = build_from_sheet(root, start, end, items, fname, wsname, legs)
+    else:
+        report = build_heuristic(root, start, end, items)
 
     out = Path(a.out) if a.out else root / "行程预估.md"
     out.write_text(report, encoding="utf-8")
-    print(f"已写入 {out}")
+    print(f"已写入 {out}" + (f"（来源：{fname} / {wsname}）" if sheet else "（来源：文件名推断）"))
 
     if a.json_out:
-        items = [i for i in collect(root, (start or dt.date.today()).year) if i.date]
         payload = [{
-            "cat": i.cat, "file": i.path.name, "date": i.date.isoformat(),
+            "cat": i.cat, "file": i.path.name, "date": i.date.isoformat() if i.date else None,
             "end_date": i.end_date.isoformat() if i.end_date else None,
             "amount": i.amount, "city": i.city, "city_to": i.city_to, "code": i.code,
         } for i in items]
